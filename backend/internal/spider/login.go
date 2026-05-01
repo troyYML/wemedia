@@ -1,0 +1,615 @@
+package spider
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"WeMediaSpider/backend/internal/models"
+	"WeMediaSpider/backend/pkg/crypto"
+	"WeMediaSpider/backend/pkg/errors"
+	"WeMediaSpider/backend/pkg/logger"
+	"WeMediaSpider/backend/pkg/timeutil"
+	"WeMediaSpider/backend/pkg/utils"
+
+	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/chromedp"
+	"go.uber.org/zap"
+)
+
+// LoginManager 登录管理器
+type LoginManager struct {
+	token           string
+	cookies         map[string]string
+	cacheFile       string
+	expireHours     int
+	securityManager *crypto.SecurityManager
+	loginTime       int64 // 添加登录时间字段
+}
+
+// NewLoginManager 创建登录管理器
+func NewLoginManager() *LoginManager {
+	homeDir, _ := os.UserHomeDir()
+	cacheDir := filepath.Join(homeDir, ".wemediaspider")
+	os.MkdirAll(cacheDir, 0755)
+
+	securityManager, err := crypto.NewSecurityManager(cacheDir)
+	if err != nil {
+		logger.Log.Error("创建安全管理器失败", zap.Error(err))
+	}
+
+	lm := &LoginManager{
+		cacheFile:       filepath.Join(cacheDir, "login_cache.json"),
+		expireHours:     96, // 4 days
+		securityManager: securityManager,
+	}
+
+	// 尝试加载缓存
+	if err := lm.loadCache(); err == nil {
+		logger.Log.Info("已从缓存加载登录状态")
+	}
+
+	return lm
+}
+
+// Login 执行登录
+func (lm *LoginManager) Login(ctx context.Context) error {
+	logger.Log.Info("开始登录流程")
+
+	// 尝试加载缓存
+	if err := lm.loadCache(); err == nil {
+		if lm.validateCache() {
+			logger.Log.Info("使用缓存登录成功")
+			return nil
+		}
+	}
+
+	// 自动检测浏览器
+	logger.Log.Info("正在检测可用浏览器")
+	browserPath := utils.GetDefaultBrowser()
+
+	if browserPath == "" {
+		logger.Log.Error("未检测到 Chrome 或 Edge 浏览器，请安装其中之一")
+		return fmt.Errorf("未检测到可用的浏览器（Chrome 或 Edge）")
+	}
+
+	logger.Log.Info("创建浏览器实例")
+
+	// 创建独立的context，不使用传入的ctx（避免被前端取消）
+	// 设置足够长的超时时间（10分钟，给用户充足时间）
+	loginCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// 创建 Chrome 选项
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.Flag("headless", false),
+		chromedp.Flag("disable-blink-features", "AutomationControlled"),
+		chromedp.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36"),
+		chromedp.Flag("disable-extensions", true),
+		chromedp.Flag("disable-plugins", true),
+		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.ExecPath(browserPath), // 使用检测到的浏览器
+	)
+
+	allocCtx, allocCancel := chromedp.NewExecAllocator(loginCtx, opts...)
+	defer allocCancel()
+
+	chromeCtx, chromeCancel := chromedp.NewContext(allocCtx)
+	defer chromeCancel()
+
+	logger.Log.Info("打开微信公众平台登录页面")
+
+	// 访问登录页面（不等待二维码，直接开始轮询）
+	err := chromedp.Run(chromeCtx,
+		chromedp.Navigate("https://mp.weixin.qq.com/"),
+	)
+
+	if err != nil {
+		logger.Log.Error("打开登录页面失败", zap.Error(err))
+		return fmt.Errorf("打开登录页面失败: %w", err)
+	}
+
+	logger.Log.Info("页面已打开，请在浏览器窗口中扫码登录")
+	logger.Log.Info("等待登录完成（最长等待10分钟）")
+
+	// 等待页面加载
+	time.Sleep(2 * time.Second)
+
+	// 使用goroutine轮询URL，避免阻塞
+	var currentURL string
+	loginSuccess := false
+	done := make(chan bool, 1)
+	errChan := make(chan error, 1)
+
+	logger.Log.Info("开始监控登录状态")
+
+	go func() {
+		for i := 0; i < 600; i++ { // 600秒 = 10分钟
+			// 检查context是否被取消
+			select {
+			case <-loginCtx.Done():
+				errChan <- fmt.Errorf("登录超时: %w", loginCtx.Err())
+				return
+			case <-chromeCtx.Done():
+				// 浏览器被关闭
+				logger.Log.Warn("检测到浏览器已关闭，登录已取消")
+				errChan <- fmt.Errorf("登录已取消：浏览器已关闭")
+				return
+			default:
+			}
+
+			// 获取当前 URL
+			var url string
+			err := chromedp.Run(chromeCtx, chromedp.Location(&url))
+			if err != nil {
+				// 检查是否是因为浏览器关闭导致的错误
+				if chromeCtx.Err() != nil {
+					logger.Log.Warn("检测到浏览器已关闭，登录已取消")
+					errChan <- fmt.Errorf("登录已取消：浏览器已关闭")
+					return
+				}
+				logger.Log.Debug("获取 URL 失败", zap.Error(err))
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			currentURL = url
+
+			// 打印当前URL用于调试
+			if i == 0 || i%10 == 0 { // 第一次和每10秒打印一次
+				logger.Log.Info("检查登录状态", zap.Int("seconds", i), zap.String("url", currentURL))
+			}
+
+			// 检查 URL 是否包含 token
+			if containsString(currentURL, "token=") {
+				logger.Log.Info("检测到登录成功", zap.String("url", currentURL))
+				done <- true
+				return
+			}
+
+			// 等待 1 秒后继续检查
+			time.Sleep(1 * time.Second)
+		}
+		errChan <- fmt.Errorf("登录超时，未在10分钟内完成扫码")
+	}()
+
+	// 等待登录完成或超时
+	select {
+	case <-done:
+		loginSuccess = true
+	case err := <-errChan:
+		logger.Log.Error("登录监控错误", zap.Error(err))
+		return err
+	}
+
+	if !loginSuccess {
+		logger.Log.Error("登录失败")
+		return fmt.Errorf("登录失败")
+	}
+
+	logger.Log.Info("正在获取登录信息")
+
+	// 提取 token 和 cookies
+	if err := lm.extractTokenAndCookies(chromeCtx, currentURL); err != nil {
+		logger.Log.Error("提取登录信息失败", zap.Error(err))
+		return err
+	}
+
+	logger.Log.Info("Token", zap.String("token", lm.token))
+	logger.Log.Info("Cookies数量", zap.Int("count", len(lm.cookies)))
+
+	// 保存缓存
+	lm.loginTime = timeutil.Now().Unix()
+	if err := lm.saveCache(); err != nil {
+		logger.Log.Error("保存缓存失败", zap.Error(err))
+		return err
+	}
+
+	logger.Log.Info("登录信息已保存到缓存")
+
+	return nil
+}
+
+// extractTokenAndCookies 提取 token 和 cookies
+func (lm *LoginManager) extractTokenAndCookies(ctx context.Context, url string) error {
+	// 从 URL 提取 token
+	// URL 格式: https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=1234567890
+	if containsString(url, "token=") {
+		// 简单解析
+		parts := splitString(url, "token=")
+		if len(parts) > 1 {
+			tokenPart := parts[1]
+			endIdx := indexOfChar(tokenPart, '&')
+			if endIdx > 0 {
+				lm.token = tokenPart[:endIdx]
+			} else {
+				lm.token = tokenPart
+			}
+		}
+	}
+
+	// 获取 cookies
+	var cookies []*network.Cookie
+	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		var err error
+		cookies, err = network.GetCookies().Do(ctx)
+		return err
+	})); err != nil {
+		return err
+	}
+
+	lm.cookies = make(map[string]string)
+	for _, cookie := range cookies {
+		lm.cookies[cookie.Name] = cookie.Value
+	}
+
+	return nil
+}
+
+// Helper functions
+func containsString(s, substr string) bool {
+	return len(s) > 0 && len(substr) > 0 && indexOfString(s, substr) >= 0
+}
+
+func indexOfString(s, substr string) int {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
+}
+
+func splitString(s, sep string) []string {
+	idx := indexOfString(s, sep)
+	if idx < 0 {
+		return []string{s}
+	}
+	return []string{s[:idx], s[idx+len(sep):]}
+}
+
+func indexOfChar(s string, c rune) int {
+	for i, ch := range s {
+		if ch == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// saveCache 保存缓存（加密存储 + HMAC）
+func (lm *LoginManager) saveCache() error {
+	// 如果没有设置登录时间，使用当前时间
+	timestamp := lm.loginTime
+	if timestamp == 0 {
+		timestamp = timeutil.Now().Unix()
+	}
+
+	cache := models.LoginCache{
+		Token:     lm.token,
+		Cookies:   lm.cookies,
+		Timestamp: timestamp,
+	}
+
+	// 序列化为 JSON
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return fmt.Errorf("failed to marshal cache: %w", err)
+	}
+
+	// 使用 SecurityManager 安全写入（加密 + HMAC + 0600权限）
+	if lm.securityManager == nil {
+		return fmt.Errorf("security manager not initialized")
+	}
+
+	if err := lm.securityManager.SecureWriteFile(lm.cacheFile, data); err != nil {
+		return fmt.Errorf("failed to save cache: %w", err)
+	}
+
+	logger.Log.Info("登录缓存已加密保存（含完整性校验）")
+	return nil
+}
+
+// loadCache 加载缓存（解密 + HMAC验证）
+func (lm *LoginManager) loadCache() error {
+	// 读取文件
+	fileData, err := os.ReadFile(lm.cacheFile)
+	if err != nil {
+		return err
+	}
+
+	// 检查是否是旧的明文格式（向后兼容）
+	var cache models.LoginCache
+	if err := json.Unmarshal(fileData, &cache); err == nil {
+		// 是旧的明文格式，加载后重新加密保存
+		logger.Log.Warn("检测到明文登录缓存，正在转换为加密格式")
+		lm.token = cache.Token
+		lm.cookies = cache.Cookies
+		lm.loginTime = cache.Timestamp
+
+		// 重新加密保存
+		if saveErr := lm.saveCache(); saveErr != nil {
+			logger.Log.Error("转换加密格式失败", zap.Error(saveErr))
+		} else {
+			logger.Log.Info("已成功转换为加密格式（含完整性校验）")
+		}
+
+		// 检查是否过期
+		elapsed := time.Since(time.Unix(cache.Timestamp, 0))
+		if elapsed.Hours() > float64(lm.expireHours) {
+			return errors.ErrTokenExpired
+		}
+
+		return nil
+	}
+
+	// 尝试使用 SecurityManager 解密（新格式，含HMAC）
+	if lm.securityManager == nil {
+		return fmt.Errorf("security manager not initialized")
+	}
+
+	decryptedData, err := lm.securityManager.SecureReadFile(lm.cacheFile)
+	if err != nil {
+		// 如果 HMAC 验证失败，可能是旧的加密格式（无HMAC）
+		// 尝试直接解密
+		logger.Log.Warn("HMAC验证失败，尝试旧加密格式")
+
+		masterKey, keyErr := lm.securityManager.GetKeyManager().GetMasterKey()
+		if keyErr != nil {
+			return fmt.Errorf("failed to get master key: %w", keyErr)
+		}
+
+		// 尝试直接解密（旧格式，无HMAC）
+		decryptedData, err = crypto.DecryptFromZGSWX(fileData, masterKey)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt cache: %w", err)
+		}
+
+		// 成功解密旧格式，重新保存为新格式（含HMAC）
+		logger.Log.Info("检测到旧加密格式，正在升级")
+		if err := json.Unmarshal(decryptedData, &cache); err != nil {
+			return fmt.Errorf("failed to unmarshal cache: %w", err)
+		}
+
+		lm.token = cache.Token
+		lm.cookies = cache.Cookies
+		lm.loginTime = cache.Timestamp
+
+		// 重新保存为新格式
+		if saveErr := lm.saveCache(); saveErr != nil {
+			logger.Log.Error("升级加密格式失败", zap.Error(saveErr))
+		} else {
+			logger.Log.Info("已成功升级为新加密格式（含完整性校验）")
+		}
+
+		// 检查是否过期
+		elapsed := time.Since(time.Unix(cache.Timestamp, 0))
+		if elapsed.Hours() > float64(lm.expireHours) {
+			return errors.ErrTokenExpired
+		}
+
+		return nil
+	}
+
+	// 解析 JSON
+	if err := json.Unmarshal(decryptedData, &cache); err != nil {
+		return fmt.Errorf("failed to unmarshal cache: %w", err)
+	}
+
+	lm.token = cache.Token
+	lm.cookies = cache.Cookies
+	lm.loginTime = cache.Timestamp
+
+	// 检查是否过期
+	elapsed := time.Since(time.Unix(cache.Timestamp, 0))
+	if elapsed.Hours() > float64(lm.expireHours) {
+		return errors.ErrTokenExpired
+	}
+
+	return nil
+}
+
+// validateCache 验证缓存
+func (lm *LoginManager) validateCache() bool {
+	// TODO: 实现 API 验证
+	return lm.token != "" && len(lm.cookies) > 0
+}
+
+// ClearCache 清除缓存
+func (lm *LoginManager) ClearCache() error {
+	lm.token = ""
+	lm.cookies = nil
+	return os.Remove(lm.cacheFile)
+}
+
+// Logout 退出登录
+func (lm *LoginManager) Logout() error {
+	return lm.ClearCache()
+}
+
+// GetStatus 获取登录状态
+func (lm *LoginManager) GetStatus() models.LoginStatus {
+	if lm.token == "" {
+		return models.LoginStatus{
+			IsLoggedIn: false,
+			Message:    "未登录",
+		}
+	}
+
+	// 如果内存中没有登录时间，尝试从缓存加载
+	if lm.loginTime == 0 {
+		if err := lm.loadCache(); err != nil {
+			// 缓存加载失败，但 token 存在，仍然视为已登录
+			logger.Log.Warn("加载缓存失败，使用内存中的登录状态", zap.Error(err))
+			return models.LoginStatus{
+				IsLoggedIn: true,
+				Token:      lm.token,
+				Message:    "已登录（缓存读取失败）",
+			}
+		}
+	}
+
+	loginTime := time.Unix(lm.loginTime, 0)
+	expireTime := loginTime.Add(time.Duration(lm.expireHours) * time.Hour)
+	hoursSince := time.Since(loginTime).Hours()
+	hoursUntil := time.Until(expireTime).Hours()
+
+	return models.LoginStatus{
+		IsLoggedIn:       true,
+		LoginTime:        loginTime,
+		ExpireTime:       expireTime,
+		HoursSinceLogin:  hoursSince,
+		HoursUntilExpire: hoursUntil,
+		Token:            lm.token,
+		Message:          fmt.Sprintf("已登录 %.1f 小时", hoursSince),
+	}
+}
+
+// GetToken 获取 token
+func (lm *LoginManager) GetToken() string {
+	return lm.token
+}
+
+// GetCookies 获取 cookies
+func (lm *LoginManager) GetCookies() map[string]string {
+	return lm.cookies
+}
+
+// GetHeaders 获取请求头
+func (lm *LoginManager) GetHeaders() map[string]string {
+	headers := map[string]string{
+		"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		"Referer":    "https://mp.weixin.qq.com/",
+	}
+
+	// 添加 Cookie
+	cookieStr := ""
+	for k, v := range lm.cookies {
+		if cookieStr != "" {
+			cookieStr += "; "
+		}
+		cookieStr += k + "=" + v
+	}
+	if cookieStr != "" {
+		headers["Cookie"] = cookieStr
+	}
+
+	return headers
+}
+
+// ExportCredentials 导出加密的登录凭证（自动加密 + HMAC）
+func (lm *LoginManager) ExportCredentials() ([]byte, error) {
+	if lm.token == "" || len(lm.cookies) == 0 {
+		return nil, fmt.Errorf("未登录，无法导出凭证")
+	}
+
+	// 创建凭证数据
+	cache := models.LoginCache{
+		Token:     lm.token,
+		Cookies:   lm.cookies,
+		Timestamp: timeutil.Now().Unix(),
+	}
+
+	// 序列化为 JSON
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return nil, fmt.Errorf("序列化凭证失败: %w", err)
+	}
+
+	// 获取主密钥
+	masterKey, err := lm.securityManager.GetKeyManager().GetMasterKey()
+	if err != nil {
+		return nil, fmt.Errorf("获取密钥失败: %w", err)
+	}
+
+	// 加密为 .zgswx 格式
+	encrypted, err := crypto.EncryptToZGSWX(data, masterKey)
+	if err != nil {
+		return nil, fmt.Errorf("加密凭证失败: %w", err)
+	}
+
+	// 计算 HMAC
+	hmacValue, err := lm.securityManager.ComputeHMAC(encrypted)
+	if err != nil {
+		return nil, fmt.Errorf("计算完整性校验失败: %w", err)
+	}
+
+	// 附加 HMAC
+	result := append(encrypted, []byte(hmacValue)...)
+
+	return result, nil
+}
+
+// ImportCredentials 导入加密的登录凭证（自动解密 + HMAC验证）
+func (lm *LoginManager) ImportCredentials(encryptedDataWithHMAC []byte) error {
+	// 检查长度（至少要有 HMAC）
+	if len(encryptedDataWithHMAC) < 64 {
+		return fmt.Errorf("无效的凭证文件：文件过小")
+	}
+
+	// 分离加密数据和 HMAC
+	encryptedData := encryptedDataWithHMAC[:len(encryptedDataWithHMAC)-64]
+	expectedHMAC := string(encryptedDataWithHMAC[len(encryptedDataWithHMAC)-64:])
+
+	// 验证 HMAC
+	valid, err := lm.securityManager.VerifyHMAC(encryptedData, expectedHMAC)
+	if err != nil {
+		// 如果 HMAC 验证失败，可能是旧格式（无HMAC）
+		logger.Log.Warn("HMAC验证失败，尝试旧格式导入")
+		encryptedData = encryptedDataWithHMAC // 使用完整数据
+	} else if !valid {
+		return fmt.Errorf("完整性校验失败：凭证文件可能已被篡改")
+	}
+
+	// 验证文件格式
+	if err := crypto.ValidateZGSWXFormat(encryptedData); err != nil {
+		return fmt.Errorf("无效的凭证文件格式: %w", err)
+	}
+
+	// 获取主密钥
+	masterKey, err := lm.securityManager.GetKeyManager().GetMasterKey()
+	if err != nil {
+		return fmt.Errorf("获取密钥失败: %w", err)
+	}
+
+	// 解密数据
+	data, err := crypto.DecryptFromZGSWX(encryptedData, masterKey)
+	if err != nil {
+		return fmt.Errorf("解密凭证失败: %w", err)
+	}
+
+	// 反序列化 JSON
+	var cache models.LoginCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return fmt.Errorf("解析凭证失败: %w", err)
+	}
+
+	// 验证凭证
+	if cache.Token == "" || len(cache.Cookies) == 0 {
+		return fmt.Errorf("凭证数据无效")
+	}
+
+	// 检查凭证是否过期
+	elapsed := time.Since(time.Unix(cache.Timestamp, 0))
+	if elapsed.Hours() > float64(lm.expireHours) {
+		return fmt.Errorf("凭证已过期（超过 %d 小时）", lm.expireHours)
+	}
+
+	// 应用凭证
+	lm.token = cache.Token
+	lm.cookies = cache.Cookies
+	lm.loginTime = cache.Timestamp // 保留原始登录时间
+
+	// 保存到本地缓存
+	if err := lm.saveCache(); err != nil {
+		logger.Log.Error("保存凭证到缓存失败", zap.Error(err))
+		return fmt.Errorf("保存凭证失败: %w", err)
+	}
+
+	logger.Log.Info("登录凭证导入成功")
+	return nil
+}

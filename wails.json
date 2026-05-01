@@ -1,0 +1,28 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "WeMediaSpider",
+  "outputfilename": "WeMediaSpider",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "",
+    "email": ""
+  },
+  "info": {
+    "companyName": "WeMediaSpider",
+    "productName": "WeMediaSpider",
+    "productVersion": "2.1.0",
+    "copyright": "Copyright © vag-Zhao 2026",
+    "comments": "微信公众号爬虫工具"
+  },
+  "windows": {
+    "icon": "icon.ico",
+    "nsis": {
+      "installMode": "perMachine",
+      "installDirectory": "$PROGRAMFILES64\\WeMediaSpider",
+      "enableWebView2RuntimeInstaller": true
+    }
+  }
+}
