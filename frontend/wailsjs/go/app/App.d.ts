@@ -14,6 +14,8 @@ export function CancelScheduledTask(arg1:number):Promise<void>;
 
 export function CancelScrape():Promise<void>;
 
+export function CancelSogouSearch():Promise<void>;
+
 export function CheckForUpdates():Promise<app.VersionInfo>;
 
 export function ClearAnalyticsCache():Promise<void>;
@@ -127,6 +129,8 @@ export function ShouldBlockClose():Promise<boolean>;
 export function ShowWindow():Promise<void>;
 
 export function StartScrape(arg1:models.ScrapeConfig):Promise<Array<models.Article>>;
+
+export function StartSogouSearch(arg1:models.SogouSearchConfig):Promise<Array<models.Article>>;
 
 export function Startup(arg1:context.Context):Promise<void>;
 

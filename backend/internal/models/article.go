@@ -17,6 +17,7 @@ type Article struct {
 	KeywordScore     int       `json:"keywordScore"`     // 关键词匹配分数
 	PublishTime      string    `json:"publishTime"`      // 格式化时间
 	PublishTimestamp int64     `json:"publishTimestamp"` // 时间戳
+	Source           string    `json:"source"`           // 数据来源: "mp" 或 "sogou"
 	CreatedAt        time.Time `json:"createdAt"`        // 创建时间
 }
 

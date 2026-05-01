@@ -10,6 +10,10 @@ import (
 
 // ConvertToDBArticle 将业务模型转换为数据库模型
 func ConvertToDBArticle(art *appmodels.Article, accountID uint) *models.Article {
+	source := art.Source
+	if source == "" {
+		source = "mp"
+	}
 	return &models.Article{
 		ArticleID:        art.ID,
 		AccountID:        accountID,
@@ -25,6 +29,7 @@ func ConvertToDBArticle(art *appmodels.Article, accountID uint) *models.Article 
 		KeywordScore:     art.KeywordScore,
 		PublishTime:      art.PublishTime,
 		PublishTimestamp: art.PublishTimestamp,
+		Source:           source,
 		CreatedAt:        art.CreatedAt,
 	}
 }
@@ -45,6 +50,7 @@ func ConvertToAppArticle(dbArt *models.Article) appmodels.Article {
 		KeywordScore:     dbArt.KeywordScore,
 		PublishTime:      dbArt.PublishTime,
 		PublishTimestamp: dbArt.PublishTimestamp,
+		Source:           dbArt.Source,
 		CreatedAt:        dbArt.CreatedAt,
 	}
 }

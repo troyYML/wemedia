@@ -22,3 +22,13 @@ export interface ScrapeConfig {
   keywordFilter: string
   maxWorkers: number
 }
+
+export interface SogouSearchConfig {
+  keywords: string[]
+  maxPages: number
+  requestIntervalMin: number
+  requestIntervalMax: number
+  includeContent: boolean
+  startDate: string
+  endDate: string
+}

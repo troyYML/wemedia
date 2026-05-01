@@ -15,7 +15,8 @@ import {
   Dropdown,
   Tag,
   Modal,
-  Tooltip,
+  Segmented,
+  InputNumber,
 } from 'antd'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -27,6 +28,7 @@ import {
   StarOutlined,
   StarFilled,
   PlusOutlined,
+  SearchOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { useScrapeStore } from '../stores/scrapeStore'
@@ -34,7 +36,7 @@ import { useLoginStore } from '../stores/loginStore'
 import { useFormStore } from '../stores/formStore'
 import { useConfigStore } from '../stores/configStore'
 import { api, events } from '../services/api'
-import type { ScrapeConfig, AccountStatus } from '../types'
+import type { ScrapeConfig, AccountStatus, SogouSearchConfig } from '../types'
 
 const { TextArea } = Input
 const { RangePicker } = DatePicker
@@ -60,6 +62,9 @@ const ScrapePage: React.FC = () => {
   } = useScrapeStore()
 
   const [loading, setLoading] = useState(false)
+  const [scrapeMode, setScrapeMode] = useState<'account' | 'keyword'>('account')
+  const [sogouForm] = Form.useForm()
+  const [sogouLoading, setSogouLoading] = useState(false)
   const [totalArticleCount, setTotalArticleCount] = useState(0)
   const [accountArticleCounts, setAccountArticleCounts] = useState<Record<string, number>>({})
   const [favoriteAccounts, setFavoriteAccounts] = useState<string[]>([])
@@ -263,8 +268,8 @@ const ScrapePage: React.FC = () => {
   }
 
   useEffect(() => {
-    // 检查登录状态
-    if (!loginStatus?.isLoggedIn) {
+    // 检查登录状态 - 关键词检索模式不需要登录
+    if (!loginStatus?.isLoggedIn && scrapeMode === 'account') {
       message.warning('请先登录')
       navigate('/login')
       return
@@ -401,14 +406,52 @@ const ScrapePage: React.FC = () => {
     const unsubCompleted = events.onScrapeCompleted(handleCompleted)
     const unsubError = events.onScrapeError(handleError)
 
+    // 搜狗搜索事件监听
+    const handleSogouProgress = (prog: any) => {
+      setProgress(prog)
+    }
+    const handleSogouCompleted = (data: any) => {
+      setSogouLoading(false)
+      setScrapingInProgress(false)
+      const total = data?.total || 0
+      if (total > 0) {
+        message.success(`搜索完成！共获取 ${total} 篇文章`)
+      }
+    }
+    const handleSogouError = (error: any) => {
+      const errorMsg = error?.error || error?.message || String(error)
+      if (!errorMsg.includes('canceled')) {
+        message.error('搜索失败: ' + errorMsg)
+      }
+      setSogouLoading(false)
+      setScrapingInProgress(false)
+    }
+    const handleSogouCaptcha = () => {
+      message.warning({
+        content: '搜狗搜索触发了验证码，请稍后重试或降低请求频率',
+        duration: 8,
+      })
+      setSogouLoading(false)
+      setScrapingInProgress(false)
+    }
+
+    const unsubSogouProgress = events.onSogouProgress(handleSogouProgress)
+    const unsubSogouCompleted = events.onSogouCompleted(handleSogouCompleted)
+    const unsubSogouError = events.onSogouError(handleSogouError)
+    const unsubSogouCaptcha = events.onSogouCaptcha(handleSogouCaptcha)
+
     // 清理函数
     return () => {
       events.offScrapeProgress(unsubProgress)
       events.offScrapeStatus(unsubStatus)
       events.offScrapeCompleted(unsubCompleted)
       events.offScrapeError(unsubError)
+      events.offSogouProgress(unsubSogouProgress)
+      events.offSogouCompleted(unsubSogouCompleted)
+      events.offSogouError(unsubSogouError)
+      events.offSogouCaptcha(unsubSogouCaptcha)
     }
-  }, [loginStatus])
+  }, [loginStatus, scrapeMode])
 
   // 开始爬取
   const handleStartScrape = async () => {
@@ -523,6 +566,77 @@ const ScrapePage: React.FC = () => {
     }
   }
 
+  // 搜狗搜索处理
+  const handleStartSogouSearch = async () => {
+    try {
+      const values = await sogouForm.validateFields()
+
+      const keywords = (values.keywords || '')
+        .split('\n')
+        .map((line: string) => line.trim())
+        .filter((line: string) => line.length > 0)
+
+      if (keywords.length === 0) {
+        message.warning('请输入至少一个搜索关键词')
+        return
+      }
+
+      const config: SogouSearchConfig = {
+        keywords,
+        maxPages: Number(values.maxPages) || 3,
+        requestIntervalMin: Number(values.requestIntervalMin) || 3,
+        requestIntervalMax: Number(values.requestIntervalMax) || 8,
+        includeContent: values.includeContent || false,
+        startDate: values.dateRange ? values.dateRange[0].format('YYYY-MM-DD') : '',
+        endDate: values.dateRange ? values.dateRange[1].format('YYYY-MM-DD') : '',
+      }
+
+      setSogouLoading(true)
+      setScrapingInProgress(true)
+      clearAccountStatuses()
+      setProgress(null)
+      setArticles([])
+      setTotalArticleCount(0)
+      setAccountArticleCounts({})
+
+      const result = await api.startSogouSearch(config)
+      setArticles(result)
+
+      setTimeout(() => {
+        const articleCount = result?.length || 0
+        if (articleCount > 0) {
+          navigate('/results')
+        } else {
+          message.warning('未搜索到任何文章')
+        }
+      }, 1500)
+    } catch (error: any) {
+      const errorMsg = error?.message || error?.toString() || '未知错误'
+      if (errorMsg.includes('context canceled') || errorMsg.includes('canceled')) {
+        return
+      }
+      message.error('搜索失败: ' + errorMsg)
+    } finally {
+      setSogouLoading(false)
+      setScrapingInProgress(false)
+    }
+  }
+
+  const handleCancelSogouSearch = async () => {
+    try {
+      await api.cancelSogouSearch()
+      message.info('已取消搜索')
+      setSogouLoading(false)
+      setScrapingInProgress(false)
+      setProgress(null)
+    } catch (error: any) {
+      message.info('取消操作: ' + (error.message || '未知错误'))
+      setSogouLoading(false)
+      setScrapingInProgress(false)
+      setProgress(null)
+    }
+  }
+
   // 状态图标
   const getStatusIcon = (status: string) => {
     switch (status) {
@@ -586,7 +700,22 @@ const ScrapePage: React.FC = () => {
     <div style={{ height: '100%', overflow: 'hidden' }}>
       <Space direction="vertical" size="small" style={{ width: '100%', height: '100%' }}>
         {/* 配置表单 */}
-        <Card title="爬取配置" styles={{ body: { padding: 16 } }} style={{ boxShadow: '0 2px 8px rgba(0,0,0,0.3)' }}>
+        <Card title={
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>采集配置</span>
+            <Segmented
+              value={scrapeMode}
+              onChange={(val) => setScrapeMode(val as 'account' | 'keyword')}
+              options={[
+                { label: '公众号采集', value: 'account', icon: <StarOutlined /> },
+                { label: '关键词检索', value: 'keyword', icon: <SearchOutlined /> },
+              ]}
+              size="small"
+              disabled={isScrapingInProgress || sogouLoading}
+            />
+          </div>
+        } styles={{ body: { padding: 16 } }} style={{ boxShadow: '0 2px 8px rgba(0,0,0,0.3)' }}>
+          <div style={{ display: scrapeMode === 'account' ? 'block' : 'none' }}>
           <Form
             form={form}
             onValuesChange={handleFormChange}
@@ -594,26 +723,25 @@ const ScrapePage: React.FC = () => {
           >
             {/* 第一行：公众号 */}
             <div style={{ display: 'flex', gap: '8px', marginBottom: 8 }}>
-              <Tooltip title="每行一个公众号名称" placement="topLeft">
-                <Form.Item
-                  label="公众号列表"
-                  name="accounts"
-                  rules={[{ required: true, message: '' }]}
-                  labelCol={{ flex: '90px' }}
-                  style={{ marginBottom: 0, flex: 1 }}
-                >
-                  <TextArea
-                    rows={2}
-                    placeholder="每行一个公众号名称，例如：人民日报、新华社"
-                    disabled={isScrapingInProgress}
-                    style={{ resize: 'none', height: 30 }}
-                    onChange={(e) => {
-                      const accountList = e.target.value.split('\n').filter((a: string) => a.trim())
-                      setSelectedAccounts(accountList)
-                    }}
-                  />
-                </Form.Item>
-              </Tooltip>
+              <Form.Item
+                label="公众号列表"
+                name="accounts"
+                tooltip="每行一个公众号名称"
+                rules={[{ required: true, message: '' }]}
+                labelCol={{ flex: '90px' }}
+                style={{ marginBottom: 0, flex: 1 }}
+              >
+                <TextArea
+                  rows={2}
+                  placeholder="每行一个公众号名称，例如：人民日报、新华社"
+                  disabled={isScrapingInProgress}
+                  style={{ resize: 'none', height: 30 }}
+                  onChange={(e) => {
+                    const accountList = e.target.value.split('\n').filter((a: string) => a.trim())
+                    setSelectedAccounts(accountList)
+                  }}
+                />
+              </Form.Item>
 
               <Dropdown
                 menu={{
@@ -833,6 +961,133 @@ const ScrapePage: React.FC = () => {
               )}
             </div>
           </Form>
+          </div>
+          <div style={{ display: scrapeMode === 'keyword' ? 'block' : 'none' }}>
+          <Form form={sogouForm} size="small">
+            {/* 第一行：搜索关键词 */}
+            <div style={{ display: 'flex', gap: '8px', marginBottom: 8 }}>
+              <Form.Item
+                label="搜索关键词"
+                name="keywords"
+                tooltip="每行一个关键词"
+                rules={[{ required: true, message: '' }]}
+                labelCol={{ flex: '90px' }}
+                style={{ marginBottom: 0, flex: 1 }}
+              >
+                <TextArea
+                  rows={2}
+                  placeholder="每行一个关键词，例如：人工智能、机器学习"
+                  disabled={sogouLoading}
+                  style={{ resize: 'none', height: 30 }}
+                />
+              </Form.Item>
+            </div>
+
+            {/* 第二行：日期范围 */}
+            <div style={{ display: 'flex', gap: '16px', marginBottom: 8 }}>
+              <Form.Item
+                label="日期范围"
+                name="dateRange"
+                labelCol={{ flex: '90px' }}
+                style={{ marginBottom: 0, flex: 1 }}
+              >
+                <RangePicker
+                  style={{ width: '100%' }}
+                  disabled={sogouLoading ? [true, true] : [false, false]}
+                />
+              </Form.Item>
+            </div>
+
+            {/* 第三行：数字配置和开关 */}
+            <div style={{ display: 'flex', gap: '86px', marginBottom: 8 }}>
+              <Form.Item
+                label="搜索页数"
+                name="maxPages"
+                initialValue={3}
+                labelCol={{ flex: '90px' }}
+                style={{ marginBottom: 0, flex: '0 0 200px' }}
+              >
+                <Input
+                  type="number"
+                  min={1}
+                  max={20}
+                  style={{ width: '100%' }}
+                  disabled={sogouLoading}
+                  suffix="页"
+                />
+              </Form.Item>
+
+              <Form.Item
+                label="请求间隔下限"
+                name="requestIntervalMin"
+                initialValue={3}
+                labelCol={{ flex: '90px' }}
+                style={{ marginBottom: 0, flex: '0 0 200px' }}
+              >
+                <Input
+                  type="number"
+                  min={1}
+                  max={60}
+                  style={{ width: '100%' }}
+                  disabled={sogouLoading}
+                  suffix="秒"
+                />
+              </Form.Item>
+
+              <Form.Item
+                label="请求间隔上限"
+                name="requestIntervalMax"
+                initialValue={8}
+                labelCol={{ flex: '90px' }}
+                style={{ marginBottom: 0, flex: '0 0 200px', marginRight: '-90px' }}
+              >
+                <Input
+                  type="number"
+                  min={1}
+                  max={120}
+                  style={{ width: '100%' }}
+                  disabled={sogouLoading}
+                  suffix="秒"
+                />
+              </Form.Item>
+
+              <div style={{ flex: 1, display: 'flex', alignItems: 'center' }}>
+                <span style={{ width: '125px', textAlign: 'right', marginRight: '8px' }}>获取正文</span>
+                <Form.Item
+                  name="includeContent"
+                  valuePropName="checked"
+                  initialValue={false}
+                  style={{ marginBottom: 0 }}
+                >
+                  <Switch disabled={sogouLoading} />
+                </Form.Item>
+              </div>
+            </div>
+
+            {/* 按钮行 */}
+            <div style={{ paddingTop: 4 }}>
+              {!sogouLoading ? (
+                <Button
+                  type="primary"
+                  icon={<SearchOutlined />}
+                  onClick={handleStartSogouSearch}
+                  block
+                >
+                  开始搜索
+                </Button>
+              ) : (
+                <Button
+                  danger
+                  icon={<StopOutlined />}
+                  onClick={handleCancelSogouSearch}
+                  block
+                >
+                  取消搜索
+                </Button>
+              )}
+            </div>
+          </Form>
+          </div>
         </Card>
 
         {/* 账号状态 - 始终显示容器 */}

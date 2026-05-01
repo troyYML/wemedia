@@ -27,6 +27,7 @@ type App struct {
 	ctx                 context.Context
 	loginManager        *spider.LoginManager
 	scraper             *spider.AsyncScraper
+	sogouScraper        *spider.SogouAsyncScraper
 	scrapeMu            sync.Mutex // 保护 scraper 和 imageDownloader 的并发访问
 	configManager       *config.Manager
 	systemConfigManager *config.SystemConfigManager

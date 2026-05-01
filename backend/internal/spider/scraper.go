@@ -435,7 +435,7 @@ func (s *Scraper) getArticleContentOnce(ctx context.Context, link string) (strin
 	sort.Strings(imageURLs)
 	imageLinks := strings.Join(imageURLs, "/n")
 
-	cleanContent := s.cleanHTMLContent(contentHTML)
+	cleanContent := cleanHTMLContent(contentHTML)
 
 	logger.Log.Debug("成功转换为Markdown", zap.Int("length", len(markdown)))
 	return markdown, imageLinks, cleanContent, nil
@@ -525,7 +525,7 @@ func splitKeywords(raw string) []string {
 	return keywords
 }
 
-func (s *Scraper) cleanHTMLContent(contentHTML string) string {
+func cleanHTMLContent(contentHTML string) string {
 	withoutTags := htmlTagRegexp.ReplaceAllString(contentHTML, " ")
 	withoutNBSP := strings.ReplaceAll(withoutTags, "&nbsp;", " ")
 	normalized := strings.Join(strings.Fields(withoutNBSP), " ")

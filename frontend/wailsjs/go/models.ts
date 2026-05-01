@@ -244,6 +244,7 @@ export namespace models {
 	    keywordScore: number;
 	    publishTime: string;
 	    publishTimestamp: number;
+	    source: string;
 	    // Go type: time
 	    createdAt: any;
 	
@@ -266,6 +267,7 @@ export namespace models {
 	        this.keywordScore = source["keywordScore"];
 	        this.publishTime = source["publishTime"];
 	        this.publishTimestamp = source["publishTimestamp"];
+	        this.source = source["source"];
 	        this.createdAt = this.convertValues(source["createdAt"], null);
 	    }
 	
@@ -489,6 +491,30 @@ export namespace models {
 	        this.includeContent = source["includeContent"];
 	        this.keywordFilter = source["keywordFilter"];
 	        this.maxWorkers = source["maxWorkers"];
+	    }
+	}
+	export class SogouSearchConfig {
+	    keywords: string[];
+	    maxPages: number;
+	    requestIntervalMin: number;
+	    requestIntervalMax: number;
+	    includeContent: boolean;
+	    startDate: string;
+	    endDate: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SogouSearchConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.keywords = source["keywords"];
+	        this.maxPages = source["maxPages"];
+	        this.requestIntervalMin = source["requestIntervalMin"];
+	        this.requestIntervalMax = source["requestIntervalMax"];
+	        this.includeContent = source["includeContent"];
+	        this.startDate = source["startDate"];
+	        this.endDate = source["endDate"];
 	    }
 	}
 	export class TaskExecutionLog {

@@ -26,3 +26,14 @@ type ScrapeConfig struct {
 	KeywordFilter      string   `json:"keywordFilter"`      // 关键词过滤
 	MaxWorkers         int      `json:"maxWorkers"`         // 最大并发数
 }
+
+// SogouSearchConfig 搜狗搜索配置
+type SogouSearchConfig struct {
+	Keywords           []string `json:"keywords"`           // 搜索关键词列表
+	MaxPages           int      `json:"maxPages"`           // 每个关键词最大搜索页数
+	RequestIntervalMin int      `json:"requestIntervalMin"` // 请求间隔下限（秒）
+	RequestIntervalMax int      `json:"requestIntervalMax"` // 请求间隔上限（秒）
+	IncludeContent     bool     `json:"includeContent"`     // 是否获取正文
+	StartDate          string   `json:"startDate"`          // 开始日期
+	EndDate            string   `json:"endDate"`            // 结束日期
+}

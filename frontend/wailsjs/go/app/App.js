@@ -18,6 +18,10 @@ export function CancelScrape() {
   return window['go']['app']['App']['CancelScrape']();
 }
 
+export function CancelSogouSearch() {
+  return window['go']['app']['App']['CancelSogouSearch']();
+}
+
 export function CheckForUpdates() {
   return window['go']['app']['App']['CheckForUpdates']();
 }
@@ -244,6 +248,10 @@ export function ShowWindow() {
 
 export function StartScrape(arg1) {
   return window['go']['app']['App']['StartScrape'](arg1);
+}
+
+export function StartSogouSearch(arg1) {
+  return window['go']['app']['App']['StartSogouSearch'](arg1);
 }
 
 export function Startup(arg1) {

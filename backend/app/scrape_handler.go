@@ -253,6 +253,128 @@ func (a *App) CancelScrape() {
 	}
 }
 
+// StartSogouSearch 开始搜狗关键词搜索（无需登录）
+func (a *App) StartSogouSearch(config models.SogouSearchConfig) ([]models.Article, error) {
+	minInterval := config.RequestIntervalMin
+	maxInterval := config.RequestIntervalMax
+	if minInterval <= 0 {
+		minInterval = 3
+	}
+	if maxInterval <= 0 {
+		maxInterval = 8
+	}
+	if maxInterval < minInterval {
+		maxInterval = minInterval
+	}
+
+	// 创建搜狗异步爬虫
+	a.scrapeMu.Lock()
+	a.sogouScraper = spider.NewSogouAsyncScraper(minInterval, maxInterval)
+	a.scrapeMu.Unlock()
+
+	// 创建进度通道
+	progressChan := make(chan models.Progress, 100)
+	statusChan := make(chan models.AccountStatus, 100)
+
+	// 启动进度发送协程
+	go func() {
+		for {
+			select {
+			case progress, ok := <-progressChan:
+				if !ok {
+					return
+				}
+				runtime.EventsEmit(a.ctx, "sogou:progress", progress)
+			case status, ok := <-statusChan:
+				if !ok {
+					return
+				}
+				runtime.EventsEmit(a.ctx, "sogou:status", status)
+			case <-a.ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// 执行搜索
+	articles, err := a.sogouScraper.BatchSearchAsync(a.ctx, config, progressChan, statusChan)
+
+	// 关闭通道
+	close(progressChan)
+	close(statusChan)
+
+	// 处理结果
+	if err == nil && len(articles) > 0 {
+		// 保存到数据库
+		if a.db != nil && a.articleRepo != nil {
+			logger.Log.Info("保存搜狗搜索文章到数据库")
+			dbArticles := make([]*dbmodels.Article, 0, len(articles))
+
+			for i := range articles {
+				article := &articles[i]
+				// 查找或创建公众号（搜狗搜索的 fakeid 可能为空，使用账号名作为标识）
+				fakeid := article.AccountFakeid
+				if fakeid == "" {
+					fakeid = "sogou_" + article.AccountName
+				}
+				account, accErr := a.accountRepo.FindOrCreate(fakeid, article.AccountName)
+				if accErr != nil {
+					logger.Log.Error("查找或创建公众号失败", zap.Error(accErr))
+					continue
+				}
+
+				dbArticle := database.ConvertToDBArticle(article, account.ID)
+				dbArticles = append(dbArticles, dbArticle)
+			}
+
+			if len(dbArticles) > 0 {
+				if saveErr := a.articleRepo.BatchCreate(dbArticles); saveErr != nil {
+					logger.Log.Error("批量保存搜狗文章到数据库失败", zap.Error(saveErr))
+				} else {
+					logger.Log.Info("搜狗文章已保存到数据库", zap.Int("count", len(dbArticles)))
+				}
+			}
+
+			// 更新统计信息
+			totalArticles, _ := a.articleRepo.Count()
+			accounts, _ := a.accountRepo.List()
+			todayArticles := database.CalculateTodayArticles(articles)
+			lastScrapeTime := articles[0].PublishTime
+
+			if statsErr := a.statsRepo.UpdateArticleStats(
+				int(totalArticles),
+				len(accounts),
+				todayArticles,
+				lastScrapeTime,
+			); statsErr != nil {
+				logger.Log.Error("更新统计信息失败", zap.Error(statsErr))
+			}
+		}
+
+		runtime.EventsEmit(a.ctx, "sogou:completed", map[string]interface{}{
+			"total": len(articles),
+		})
+	} else if err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			runtime.EventsEmit(a.ctx, "sogou:error", map[string]string{
+				"error": err.Error(),
+			})
+		}
+	}
+
+	return articles, err
+}
+
+// CancelSogouSearch 取消搜狗搜索
+func (a *App) CancelSogouSearch() {
+	a.scrapeMu.Lock()
+	scraper := a.sogouScraper
+	a.scrapeMu.Unlock()
+	if scraper != nil {
+		scraper.Cancel()
+	}
+}
+
 // ============================================================
 // 配置相关
 // ============================================================

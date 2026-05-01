@@ -19,6 +19,7 @@ type Article struct {
 	KeywordScore     int       `gorm:"not null;default:0"`
 	PublishTime      string    `gorm:"size:32"`
 	PublishTimestamp int64     `gorm:"not null;index"`
+	Source           string    `gorm:"size:32;default:mp;index"`
 	CreatedAt        time.Time `gorm:"index"`
 	UpdatedAt        time.Time
 	Account          Account   `gorm:"foreignKey:AccountID"`

@@ -30,6 +30,8 @@ import {
   GetDataDirectory,
   OpenDataFileDialog,
   CheckForUpdates,
+  StartSogouSearch,
+  CancelSogouSearch,
 } from '../../wailsjs/go/app/App'
 
 // Wails runtime
@@ -40,6 +42,7 @@ import type {
   Account,
   Article,
   ScrapeConfig,
+  SogouSearchConfig,
   Config,
   Progress,
   AccountStatus,
@@ -98,6 +101,10 @@ export const api = {
 
   // Version check APIs
   checkForUpdates: CheckForUpdates,
+
+  // Sogou Search APIs
+  startSogouSearch: StartSogouSearch,
+  cancelSogouSearch: CancelSogouSearch,
 }
 
 // Event listeners
@@ -155,6 +162,38 @@ export const events = {
   },
 
   offImageError: (unsubscribe: () => void) => {
+    unsubscribe()
+  },
+
+  onSogouProgress: (callback: (progress: Progress) => void) => {
+    return EventsOn('sogou:progress', callback)
+  },
+
+  offSogouProgress: (unsubscribe: () => void) => {
+    unsubscribe()
+  },
+
+  onSogouCompleted: (callback: (data: any) => void) => {
+    return EventsOn('sogou:completed', callback)
+  },
+
+  offSogouCompleted: (unsubscribe: () => void) => {
+    unsubscribe()
+  },
+
+  onSogouError: (callback: (error: any) => void) => {
+    return EventsOn('sogou:error', callback)
+  },
+
+  offSogouError: (unsubscribe: () => void) => {
+    unsubscribe()
+  },
+
+  onSogouCaptcha: (callback: (data: any) => void) => {
+    return EventsOn('sogou:captcha', callback)
+  },
+
+  offSogouCaptcha: (unsubscribe: () => void) => {
     unsubscribe()
   },
 }
