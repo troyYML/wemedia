@@ -469,16 +469,28 @@ func (s *SogouScraper) getArticleContentOnce(ctx context.Context, link string) (
 
 // FilterArticlesByDate 按日期过滤文章
 func (s *SogouScraper) FilterArticlesByDate(articles []models.Article, startDate, endDate string) []models.Article {
-	loc := time.Local
-	start, _ := time.ParseInLocation("2006-01-02", startDate, loc)
-	end, _ := time.ParseInLocation("2006-01-02", endDate, loc)
+	// 使用中国时区（UTC+8），与搜索结果中的时区保持一致
+	chinaLoc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		chinaLoc = time.FixedZone("CST", 8*3600)
+		logger.Log.Warn("无法加载 Asia/Shanghai 时区，使用固定 UTC+8", zap.Error(err))
+	}
+	start, _ := time.ParseInLocation("2006-01-02", startDate, chinaLoc)
+	end, _ := time.ParseInLocation("2006-01-02", endDate, chinaLoc)
 	end = end.Add(24 * time.Hour)
 
 	filtered := make([]models.Article, 0)
 	for _, article := range articles {
-		publishTime := time.Unix(article.PublishTimestamp, 0)
+		publishTime := time.Unix(article.PublishTimestamp, 0).In(chinaLoc)
 		if (publishTime.Equal(start) || publishTime.After(start)) && publishTime.Before(end) {
 			filtered = append(filtered, article)
+		} else {
+			logger.Log.Debug("文章被日期过滤排除",
+				zap.String("title", article.Title),
+				zap.String("publishTime", publishTime.Format("2006-01-02 15:04:05")),
+				zap.String("startDate", start.Format("2006-01-02 15:04:05")),
+				zap.String("endDate", end.Format("2006-01-02 15:04:05")),
+			)
 		}
 	}
 
